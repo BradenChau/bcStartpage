@@ -332,6 +332,17 @@
             background: var(--accent-hover);
         }
 
+        /* Themed scrollbars everywhere — match the rest of the aesthetic */
+        * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+        ::-webkit-scrollbar { width: 9px; height: 9px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border); border-radius: 5px;
+            border: 2px solid transparent; background-clip: padding-box;
+        }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent); background-clip: padding-box; }
+        ::-webkit-scrollbar-corner { background: transparent; }
+
         .time-block {
             display: flex;
             align-items: center;
@@ -732,7 +743,7 @@
             font-size: 9px; color: var(--text-muted); text-align: right; padding-right: 4px;
             border-right: 1px solid var(--border); border-bottom: none; position: relative;
         }
-        .cal-axis .cal-hour span { position: relative; top: -6px; }
+        .cal-axis .cal-hour span { position: relative; top: 2px; }
         .cal-col { position: relative; border-right: 1px solid var(--border); }
         .cal-event {
             position: absolute; left: 1px; right: 1px; background-color: var(--accent);
@@ -2340,7 +2351,8 @@
                             section.links.forEach(link => {
                                 if (link && link.text && link.url) {
                                     const linkElement = document.createElement('a');
-                                    linkElement.href = link.url;
+                                    linkElement.href = safeUrl(link.url);
+                                    linkElement.rel = 'noopener noreferrer';
                                     linkElement.textContent = link.text;
                                     linksDiv.appendChild(linkElement);
                                 }
@@ -2440,6 +2452,19 @@
                 hasDriveScope() { return /drive\.appdata/.test(this.grantedScopes); },
                 onAuth(cb) { this.listeners.push(cb); },
                 notify(tok) { this.listeners.forEach(f => { try { f(tok); } catch (e) {} }); },
+                // restore a still-valid token from a previous visit so we don't re-auth every load
+                load() {
+                    try {
+                        const s = JSON.parse(localStorage.getItem('homepage_gtoken') || 'null');
+                        if (s && s.expiry > Date.now() + 30000) {
+                            this.token = s.token; this.expiry = s.expiry; this.grantedScopes = s.scopes || '';
+                        }
+                    } catch (e) {}
+                },
+                save() {
+                    try { localStorage.setItem('homepage_gtoken', JSON.stringify({ token: this.token, expiry: this.expiry, scopes: this.grantedScopes })); } catch (e) {}
+                },
+                clear() { this.token = null; this.expiry = 0; try { localStorage.removeItem('homepage_gtoken'); } catch (e) {} },
                 ensureClient() {
                     if (this.tokenClient || !this.ready() || !this.clientId) return;
                     this.tokenClient = google.accounts.oauth2.initTokenClient({
@@ -2449,6 +2474,7 @@
                                 this.token = resp.access_token;
                                 this.expiry = Date.now() + ((resp.expires_in || 3600) * 1000) - 60000;
                                 this.grantedScopes = resp.scope || this.grantedScopes;
+                                this.save();
                                 this.notify(this.token);
                             } else { this.notify(null); }
                         }
@@ -2474,6 +2500,13 @@
                          'August','September','October','November','December'];
             const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
                 c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            // block script-bearing URL schemes (javascript:, data:, vbscript:) on user/synced links
+            const safeUrl = (u) => {
+                const s = String(u == null ? '' : u).trim();
+                if (!s) return '#';
+                if (/^[a-z0-9.+-]*\s*:/i.test(s) && /^\s*(javascript|data|vbscript|file)\s*:/i.test(s)) return '#';
+                return s;
+            };
             const ymd = (s) => { const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); };
             const sameDay = (a,b) => a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate();
             const startOfDay = (d) => { const x=new Date(d); x.setHours(0,0,0,0); return x; };
@@ -2592,7 +2625,7 @@
                             + '&timeMin=' + encodeURIComponent(start.toISOString())
                             + '&timeMax=' + encodeURIComponent(end.toISOString());
                         const res = await fetch(url, { headers: { Authorization: 'Bearer ' + googleAuth.token } });
-                        if (res.status === 401) { googleAuth.token = null; googleAuth.request(false); return; }
+                        if (res.status === 401) { googleAuth.clear(); googleAuth.request(true); return; }
                         if (res.status === 404) { this.message('Calendar "' + esc(this.calendarId) + '" not found. Check the email, or share that calendar with your signed-in account.'); return; }
                         if (!res.ok) { this.message('Could not load calendar (error ' + res.status + ').'); return; }
                         const data = await res.json();
@@ -2992,7 +3025,7 @@
                     this.storage.set('pomodoro', this.settings);
                     if (!this.running) { this.remaining = this.dur(this.mode); this.updateDisplay(); }
                     this.renderDots();
-                    if (window._driveSync) window._driveSync.schedulePush();
+                    driveSync.schedulePush();
                 }
                 // re-read everything from storage and refresh UI (used after a sync pull)
                 reload() {
@@ -3032,7 +3065,7 @@
                 }
 
                 persist() {
-                    if (this.dirty) { this.storage.set('studyData', this.studyData); this.dirty = false; if (window._driveSync) window._driveSync.schedulePush(); }
+                    if (this.dirty) { this.storage.set('studyData', this.studyData); this.dirty = false; driveSync.schedulePush(); }
                     this.storage.set('studyView', this.view);
                 }
 
@@ -3138,6 +3171,8 @@
                     document.addEventListener('visibilitychange', () => { if (document.hidden && this.enabled) this.push(); });
                     window.addEventListener('beforeunload', () => { if (this.enabled) this.push(); });
                     this.setStatus(this.storage.get('gcal', {}).clientId ? 'connecting' : 'off');
+                    // if a valid token was restored from a previous visit, start syncing without any prompt
+                    if (googleAuth.hasToken()) this.onAuth();
                 }
 
                 hdr(extra) { return Object.assign({ Authorization: 'Bearer ' + googleAuth.token }, extra || {}); }
@@ -3155,15 +3190,18 @@
                     try { await this.pull(); } catch (e) { this.setStatus('error'); }
                 }
 
-                authFail() {
-                    if (!this.upgraded) { this.upgraded = true; googleAuth.token = null; googleAuth.request(false); }
-                    else this.setStatus('error');
+                // 401 = token expired/invalid -> drop it and refresh silently (no popup).
+                // 403 = missing Drive scope -> ask for consent once.
+                authFail(status) {
+                    if (status === 401) { googleAuth.clear(); this.enabled = false; this.setStatus('connecting'); googleAuth.request(true); return; }
+                    if (status === 403 && !this.upgraded) { this.upgraded = true; googleAuth.request(false); return; }
+                    this.setStatus('error');
                 }
 
                 async findFile() {
                     const q = encodeURIComponent("name='" + SYNC_FILE + "'");
                     const r = await fetch('https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=files(id,name)&q=' + q, { headers: this.hdr() });
-                    if (r.status === 401 || r.status === 403) { this.authFail(); return undefined; }
+                    if (r.status === 401 || r.status === 403) { this.authFail(r.status); return undefined; }
                     if (!r.ok) return null;
                     const d = await r.json();
                     return (d.files && d.files[0]) ? d.files[0].id : null;
@@ -3177,7 +3215,7 @@
                     let remote = null;
                     if (id) {
                         const r = await fetch('https://www.googleapis.com/drive/v3/files/' + id + '?alt=media', { headers: this.hdr() });
-                        if (r.status === 401 || r.status === 403) { this.authFail(); return; }
+                        if (r.status === 401 || r.status === 403) { this.authFail(r.status); return; }
                         if (r.ok) remote = await r.json().catch(() => null);
                     }
                     this.merge(remote);
@@ -3245,14 +3283,14 @@
                                 method: 'POST', headers: this.hdr({ 'Content-Type': 'application/json' }),
                                 body: JSON.stringify({ name: SYNC_FILE, parents: ['appDataFolder'] })
                             });
-                            if (meta.status === 401 || meta.status === 403) { this.authFail(); return; }
+                            if (meta.status === 401 || meta.status === 403) { this.authFail(meta.status); return; }
                             if (!meta.ok) { this.setStatus('error'); return; }
                             this.fileId = (await meta.json()).id;
                         }
                         const up = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + this.fileId + '?uploadType=media', {
                             method: 'PATCH', headers: this.hdr({ 'Content-Type': 'application/json' }), body: JSON.stringify(file)
                         });
-                        if (up.status === 401 || up.status === 403) { this.authFail(); return; }
+                        if (up.status === 401 || up.status === 403) { this.authFail(up.status); return; }
                         if (up.ok) { this.lastSync = Date.now(); this.storage.set('syncMeta', { updatedAt: file.updatedAt, lastSync: this.lastSync }); this.setStatus('synced'); }
                         else this.setStatus('error');
                     } catch (e) { this.setStatus('error'); }
@@ -3329,8 +3367,6 @@
             const calendar = new CalendarManager(storage);
             const pomodoro = new PomodoroManager(storage);
             const driveSync = new DriveSync(storage);
-            window._driveSync = driveSync;
-            window._googleAuth = googleAuth;
 
             // Smooth transitions
             function transition(hideElement, showElement, callback) {
@@ -3360,6 +3396,7 @@
             // Public API
             return {
                 init() {
+                    googleAuth.load();        // reuse a still-valid token from a previous visit (no re-login)
                     theme.init();
                     sections.init();
                     automation.init();
@@ -3580,9 +3617,8 @@
                     const side = storage.get('layoutSide', 'left') === 'right' ? 'left' : 'right';
                     storage.set('layoutSide', side);
                     applyLayout();
-                    if (window._driveSync) window._driveSync.schedulePush();
+                    driveSync.schedulePush();
                 },
-                driveSync,
                 automation
             };
         })();
